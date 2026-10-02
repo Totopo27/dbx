@@ -86,7 +86,7 @@ test("ignores fractional trailing zeros when checking Excel numeric precision", 
 });
 
 test("builds a result workbook with a separate SQL worksheet", () => {
-  const sqlWorksheet = buildXlsxSqlWorksheet([{ sql: "SELECT\n  id,\n  name\nFROM users\nWHERE active = true" }]);
+  const sqlWorksheet = buildXlsxSqlWorksheet([{ sql: "SELECT id, name FROM users WHERE active = true" }]);
   assert.ok(sqlWorksheet);
   const workbook = buildXlsxWorkbookMulti([{ sheetName: "Result", columns: ["id", "name"], rows: [[1, "Ada"]] }, sqlWorksheet]);
   const text = new TextDecoder().decode(workbook);
@@ -95,7 +95,45 @@ test("builds a result workbook with a separate SQL worksheet", () => {
   assert.match(text, /name="SQL"/);
   assert.match(text, /xl\/worksheets\/sheet2\.xml/);
   assert.match(text, /wrapText="1" vertical="top"/);
-  assert.match(text, /<c r="A2" t="inlineStr" s="4"><is><t xml:space="preserve">SELECT\n  id,\n  name\nFROM users\nWHERE active = true<\/t><\/is><\/c>/);
+  assert.match(text, /SELECT id, name FROM users WHERE active = true/);
+});
+
+test("omits autoFilter on worksheet when autoFilter is false", () => {
+  const sqlWorksheet = buildXlsxSqlWorksheet([{ sql: "SELECT id, name FROM users" }]);
+  assert.ok(sqlWorksheet);
+  const workbook = buildXlsxWorkbookMulti([
+    { sheetName: "Result", columns: ["id", "name"], rows: [[1, "Ada"]], autoFilter: true },
+    { ...sqlWorksheet, autoFilter: false },
+  ]);
+  const sheet1 = readStoredZipEntry(workbook, "xl/worksheets/sheet1.xml");
+  const sheet2 = readStoredZipEntry(workbook, "xl/worksheets/sheet2.xml");
+
+  assert.match(sheet1, /<autoFilter ref="A1:B2"\/>/);
+  assert.doesNotMatch(sheet2, /<autoFilter/);
+});
+
+test("preserves whitespace and line breaks with xml:space in SQL cells", () => {
+  const multilineSql = "SELECT id, name\n  FROM users\n WHERE active = true\n ORDER BY id ASC";
+  const sqlWorksheet = buildXlsxSqlWorksheet([{ sql: multilineSql }]);
+  assert.ok(sqlWorksheet);
+  const workbook = buildXlsxWorkbookMulti([
+    { sheetName: "Result", columns: ["id"], rows: [[1]] },
+    { ...sqlWorksheet, autoFilter: false },
+  ]);
+  const sheet2 = readStoredZipEntry(workbook, "xl/worksheets/sheet2.xml");
+
+  assert.match(sheet2, /<c r="A2" t="inlineStr" s="4"><is><t xml:space="preserve">SELECT id, name\n  FROM users\n WHERE active = true\n ORDER BY id ASC<\/t><\/is><\/c>/);
+});
+
+test("adjusts column width for SQL worksheet based on line lengths", () => {
+  const sql = "SELECT id, name, email, department, created_at FROM users WHERE id IN (1, 2, 3)";
+  const sqlWorksheet = buildXlsxSqlWorksheet([{ sql }]);
+  assert.ok(sqlWorksheet);
+  const workbook = buildXlsxWorkbookMulti([sqlWorksheet]);
+  const sheet1 = readStoredZipEntry(workbook, "xl/worksheets/sheet1.xml");
+
+  // Header "SQL" (length 3 + 2 = 5) clamped to at least 40; sql length 79 + 2 = 81.
+  assert.match(sheet1, /<col min="1" max="1" width="81" customWidth="1"\/>/);
 });
 
 test("web in-memory XLSX export splits oversized worksheets", () => {

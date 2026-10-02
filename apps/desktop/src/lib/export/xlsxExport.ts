@@ -117,20 +117,23 @@ function normalizeUniqueSheetNames(sheets: readonly { sheetName?: string }[]): s
 function estimateColumnWidths(columns: readonly string[], rows: readonly (readonly XlsxCellValue[])[], rowStart: number, rowEnd: number, columnComments?: readonly (string | null)[]): number[] {
   return columns.map((column, colIndex) => {
     const headerText = columnComments?.[colIndex] || column;
-    const isSqlCol = column.toLowerCase() === "sql";
+    const isSqlCol = column.toUpperCase() === "SQL";
     const maxClamp = isSqlCol ? 100 : 60;
     const values = Array.from({ length: Math.min(100, rowEnd - rowStart) }, (_, index) => rows[rowStart + index]?.[colIndex]);
     const maxLen = [
-      headerText.length,
+      headerText,
       ...values.map((value) => {
-        if (value == null) return 0;
-        const lines = String(value).split(/\r?\n/);
-        return lines.reduce((max, line) => Math.max(max, line.length), 0);
+        if (value == null) return "";
+        const str = String(value);
+        if (isSqlCol || str.includes("\n")) {
+          return str.split("\n").reduce((max, line) => Math.max(max, line.length), 0);
+        }
+        return str.length;
       }),
     ]
-      .map((length) => Math.min(length, maxClamp))
+      .map((value) => Math.min(typeof value === "number" ? value : value.length, maxClamp))
       .reduce((max, length) => Math.max(max, length), 8);
-    return Math.max(10, Math.min(maxClamp, maxLen + 2));
+    return Math.max(isSqlCol ? 40 : 10, Math.min(maxClamp, maxLen + 2));
   });
 }
 
@@ -171,9 +174,8 @@ function cellXml(value: XlsxCellValue, rowIndex: number, colIndex: number, style
     const number = safeExcelNumber(value);
     if (number !== undefined) return `<c r="${ref}"${styleAttr}><v>${number}</v></c>`;
   }
-  const text = String(value);
-  const spaceAttr = text.startsWith(" ") || text.endsWith(" ") || text.includes("\n") || text.includes("\r") || text.includes("\t") ? ' xml:space="preserve"' : "";
-  return `<c r="${ref}" t="inlineStr"${styleAttr}><is><t${spaceAttr}>${escapeXml(text)}</t></is></c>`;
+  const spaceAttr = typeof value === "string" && /^\s|\s$|[\r\n\t]/.test(value) ? ' xml:space="preserve"' : "";
+  return `<c r="${ref}" t="inlineStr"${styleAttr}><is><t${spaceAttr}>${escapeXml(String(value))}</t></is></c>`;
 }
 
 function worksheetXml(segment: XlsxWorksheetSegment): string {
