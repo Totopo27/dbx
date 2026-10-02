@@ -51,6 +51,10 @@ pub struct XlsxWorksheetData {
     pub rows: Vec<Vec<Value>>,
     #[serde(default)]
     pub numeric_column_right_align: bool,
+    /// Per-sheet override of the workbook-wide auto filter flag, so trailing
+    /// SQL sheets can drop their filter buttons while data sheets keep them.
+    #[serde(default)]
+    pub auto_filter: Option<bool>,
 }
 
 fn normalize_sheet_name(input: Option<&str>) -> String {
@@ -481,6 +485,7 @@ impl<W: Write + Seek> StreamingXlsxWriter<W> {
                 column_comments: &sheet.column_comments,
                 rows: &sheet.rows,
                 numeric_column_right_align: sheet.numeric_column_right_align,
+                auto_filter: None,
             };
             write_worksheet_xml(&mut self.zip, &segment, false, self.date_time_format.as_deref())?;
         }
@@ -1106,6 +1111,7 @@ struct WorksheetSegment<'a> {
     column_comments: &'a [Option<String>],
     rows: &'a [Vec<Value>],
     numeric_column_right_align: bool,
+    auto_filter: Option<bool>,
 }
 
 fn normalize_unique_sheet_names(segments: &[WorksheetSegment]) -> Vec<String> {
@@ -1149,6 +1155,7 @@ fn split_sheets_for_max_rows<'a>(
                 column_comments: &sheet.column_comments,
                 rows: &sheet.rows,
                 numeric_column_right_align: sheet.numeric_column_right_align,
+                auto_filter: sheet.auto_filter,
             });
             continue;
         }
@@ -1173,6 +1180,7 @@ fn split_sheets_for_max_rows<'a>(
                 column_comments: &sheet.column_comments,
                 rows: chunk,
                 numeric_column_right_align: sheet.numeric_column_right_align,
+                auto_filter: sheet.auto_filter,
             });
         }
     }
@@ -1247,7 +1255,7 @@ fn build_xlsx_workbook_multi_with_max_rows_and_auto_filter(
     }
     for (index, segment) in segments.iter().enumerate() {
         zip.start_file(format!("xl/worksheets/sheet{}.xml", index + 1), options).map_err(|err| err.to_string())?;
-        write_worksheet_xml(&mut zip, segment, auto_filter, date_time_format)?;
+        write_worksheet_xml(&mut zip, segment, segment.auto_filter.unwrap_or(auto_filter), date_time_format)?;
     }
 
     let output = zip.finish().map_err(|err| err.to_string())?;
@@ -1335,6 +1343,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!(1), json!("Ada & Bob"), json!(true)], vec![json!(2), json!(null), json!(false)]],
             numeric_column_right_align: false,
+            auto_filter: None,
         })
         .expect("build workbook");
 
@@ -1361,10 +1370,37 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!(1)]],
             numeric_column_right_align: false,
+            auto_filter: None,
         };
         let workbook = build_xlsx_workbook_multi_with_auto_filter(&[worksheet], false, None).expect("build workbook");
 
         assert!(!read_zip_entry(&workbook, "xl/worksheets/sheet1.xml").contains("<autoFilter"));
+    }
+
+    #[test]
+    fn per_sheet_auto_filter_overrides_the_workbook_flag() {
+        let data = XlsxWorksheetData {
+            sheet_name: Some("Data".to_string()),
+            columns: vec!["id".to_string()],
+            column_types: vec![],
+            column_comments: vec![],
+            rows: vec![vec![json!(1)]],
+            numeric_column_right_align: false,
+            auto_filter: None,
+        };
+        let sql = XlsxWorksheetData {
+            sheet_name: Some("SQL".to_string()),
+            columns: vec!["SQL".to_string()],
+            column_types: vec![],
+            column_comments: vec![],
+            rows: vec![vec![json!("SELECT 1")]],
+            numeric_column_right_align: false,
+            auto_filter: Some(false),
+        };
+        let workbook = build_xlsx_workbook_multi_with_auto_filter(&[data, sql], true, None).expect("build workbook");
+
+        assert!(read_zip_entry(&workbook, "xl/worksheets/sheet1.xml").contains("<autoFilter"));
+        assert!(!read_zip_entry(&workbook, "xl/worksheets/sheet2.xml").contains("<autoFilter"));
     }
 
     #[test]
@@ -1376,6 +1412,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!("1.00000"), json!("2800.000000"), json!("00123")]],
             numeric_column_right_align: false,
+            auto_filter: None,
         })
         .expect("build workbook");
 
@@ -1394,6 +1431,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!("5.0000"), json!("0.3500000"), json!("1.23E-5")]],
             numeric_column_right_align: true,
+            auto_filter: None,
         })
         .expect("build workbook");
 
@@ -1419,6 +1457,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!("5.0000"), json!("7")]],
             numeric_column_right_align: false,
+            auto_filter: None,
         })
         .expect("build workbook");
 
@@ -1436,6 +1475,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!("0.00000000000000000001")]],
             numeric_column_right_align: true,
+            auto_filter: None,
         })
         .expect("build workbook");
 
@@ -1466,6 +1506,7 @@ mod tests {
                 json!("not-a-number"),
             ]],
             numeric_column_right_align: true,
+            auto_filter: None,
         })
         .expect("build workbook");
 
@@ -1508,6 +1549,7 @@ mod tests {
                 json!("2024-02-25T13:02:15+08:00"),
             ]],
             numeric_column_right_align: false,
+            auto_filter: None,
         })
         .expect("build workbook");
 
@@ -1536,6 +1578,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!("2026-07-25 13:02:15.456")]],
             numeric_column_right_align: false,
+            auto_filter: None,
         };
 
         let workbook =
@@ -1587,6 +1630,7 @@ mod tests {
                 json!("2800.000000"),
             ]],
             numeric_column_right_align: false,
+            auto_filter: None,
         })
         .expect("build workbook");
 
@@ -1614,6 +1658,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!("9223372036854775807"), json!("123456789012345.6789000000")]],
             numeric_column_right_align: false,
+            auto_filter: None,
         })
         .expect("build workbook");
 
@@ -1647,6 +1692,7 @@ mod tests {
                 json!(12345678901234567.89_f64),
             ]],
             numeric_column_right_align: false,
+            auto_filter: None,
         })
         .expect("build workbook");
 
@@ -1686,6 +1732,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!("ok")]],
             numeric_column_right_align: false,
+            auto_filter: None,
         })
         .expect("build workbook");
         let workbook_xml = read_zip_entry(&workbook, "xl/workbook.xml");
@@ -1703,6 +1750,7 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!(1)]],
                 numeric_column_right_align: false,
+                auto_filter: None,
             },
             XlsxWorksheetData {
                 sheet_name: Some("Result 2".to_string()),
@@ -1711,6 +1759,7 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!("Ada")]],
                 numeric_column_right_align: false,
+                auto_filter: None,
             },
         ])
         .expect("build multi-sheet workbook");
@@ -1811,6 +1860,7 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!("SELECT id, name FROM users")]],
                 numeric_column_right_align: false,
+                auto_filter: None,
             };
             let mut writer = start_streaming_xlsx_workbook_with_trailing_sheets(
                 file,
@@ -1849,6 +1899,7 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!(1)]],
                 numeric_column_right_align: false,
+                auto_filter: None,
             },
             XlsxWorksheetData {
                 sheet_name: Some("SQL".to_string()),
@@ -1857,6 +1908,7 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!(multiline_sql)]],
                 numeric_column_right_align: false,
+                auto_filter: None,
             },
         ])
         .expect("build workbook");
@@ -1878,6 +1930,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!(1.5), json!("row")]],
             numeric_column_right_align: true,
+            auto_filter: None,
         })
         .expect("build workbook");
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
@@ -1895,6 +1948,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![vec![json!(1.5), json!("row")]],
             numeric_column_right_align: false,
+            auto_filter: None,
         })
         .expect("build workbook");
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
@@ -1935,6 +1989,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![row],
             numeric_column_right_align: true,
+            auto_filter: None,
         })
         .expect("build workbook");
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
@@ -2045,6 +2100,7 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!("SELECT 1")]],
                 numeric_column_right_align: false,
+                auto_filter: None,
             };
             let mut writer = start_streaming_xlsx_workbook_with_max_rows(
                 file,
@@ -2129,6 +2185,7 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!("SELECT 1")]],
                 numeric_column_right_align: false,
+                auto_filter: None,
             };
             let sql_sheet_b = XlsxWorksheetData {
                 sheet_name: Some("SQL".to_string()),
@@ -2137,6 +2194,7 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!("SELECT 2")]],
                 numeric_column_right_align: false,
+                auto_filter: None,
             };
             let mut writer = start_streaming_xlsx_workbook_with_max_rows(
                 file,
@@ -2177,6 +2235,7 @@ mod tests {
                 column_comments: vec![],
                 rows: vec![vec![json!("SELECT 1")]],
                 numeric_column_right_align: false,
+                auto_filter: None,
             };
             let mut writer = start_streaming_xlsx_workbook_with_max_rows(
                 file,
@@ -2216,6 +2275,7 @@ mod tests {
                 column_comments: vec![],
                 rows,
                 numeric_column_right_align: false,
+                auto_filter: None,
             }],
             2,
             None,
@@ -2279,6 +2339,7 @@ mod tests {
             column_comments: vec![],
             rows,
             numeric_column_right_align: true,
+            auto_filter: None,
         };
         let segment = WorksheetSegment {
             name: worksheet.sheet_name.clone(),
@@ -2287,6 +2348,7 @@ mod tests {
             column_comments: &worksheet.column_comments,
             rows: &worksheet.rows,
             numeric_column_right_align: worksheet.numeric_column_right_align,
+            auto_filter: None,
         };
         let mut stats = WriteStats::default();
 
@@ -2312,6 +2374,7 @@ mod tests {
             column_comments: vec![],
             rows: (0..7).map(|i| vec![json!(i)]).collect(),
             numeric_column_right_align: false,
+            auto_filter: None,
         };
         let sheet_b = XlsxWorksheetData {
             sheet_name: Some("B".to_string()),
@@ -2320,6 +2383,7 @@ mod tests {
             column_comments: vec![],
             rows: (100..102).map(|i| vec![json!(i)]).collect(),
             numeric_column_right_align: false,
+            auto_filter: None,
         };
         let data = build_xlsx_workbook_multi_with_max_rows(&[sheet_a, sheet_b], 3, None).expect("build workbook");
 
@@ -2353,6 +2417,7 @@ mod tests {
                 column_comments: vec![],
                 rows,
                 numeric_column_right_align: false,
+                auto_filter: None,
             }],
             100,
             None,
@@ -2380,6 +2445,7 @@ mod tests {
             column_comments: vec![],
             rows: vec![],
             numeric_column_right_align: false,
+            auto_filter: None,
         })
         .expect("build workbook");
 
