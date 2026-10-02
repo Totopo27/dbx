@@ -19,6 +19,7 @@ const NUMERIC_LEFT_ALIGN_STYLE: usize = 5;
 const MAX_NUMERIC_SCALE_FORMAT: usize = 15;
 const NUMERIC_SCALE_STYLE_BASE: usize = 6;
 const SCALE_NUMFMT_ID_BASE: usize = 166;
+pub const XLSX_WRAP_TEXT_STYLE: usize = NUMERIC_SCALE_STYLE_BASE + MAX_NUMERIC_SCALE_FORMAT * 2;
 
 fn numeric_scale_style(scale: usize, right_align: bool) -> Option<usize> {
     if scale == 0 || scale > MAX_NUMERIC_SCALE_FORMAT {
@@ -163,15 +164,16 @@ pub struct StreamingXlsxWriter<W: Write + Seek> {
 }
 
 /// Estimate column widths from header names only (used by the streaming path
-/// where full row data is not available up-front).  Each width is clamped to
-/// [10, 60] to stay within reasonable bounds.
+/// where full row data is not available up-front). Each width is clamped to
+/// [10, 60] (or 100 for SQL columns) to stay within reasonable bounds.
 fn estimate_header_widths(columns: &[String], column_comments: &[Option<String>]) -> Vec<usize> {
     columns
         .iter()
         .enumerate()
         .map(|(index, col)| {
             let header_text = column_comments.get(index).and_then(|c| c.as_deref()).unwrap_or(col.as_str());
-            (header_text.chars().count() + 2).clamp(10, 60)
+            let max_clamp = if col.eq_ignore_ascii_case("sql") { 100 } else { 60 };
+            (header_text.chars().count() + 2).clamp(10, max_clamp)
         })
         .collect()
 }
@@ -218,18 +220,17 @@ fn push_data_row_xml(
     numeric_right_align: bool,
 ) {
     write!(output, "<row r=\"{row_number}\">").expect("writing XLSX XML into a String cannot fail");
-    for (col_index, _) in columns.iter().enumerate() {
+    for (col_index, col) in columns.iter().enumerate() {
         let col_type = column_types.get(col_index);
         let align_style = numeric_column_style(col_type, numeric_right_align);
-        push_typed_cell_xml(
-            output,
-            row.get(col_index),
-            col_type,
-            row_number - 1,
-            col_index,
-            align_style,
-            date_time_format,
-        );
+        let val = row.get(col_index);
+        let is_sql_col = col.eq_ignore_ascii_case("sql");
+        let is_multiline = match val {
+            Some(Value::String(s)) => s.contains('\n') || s.contains('\r'),
+            _ => false,
+        };
+        let style = if is_sql_col || is_multiline { Some(XLSX_WRAP_TEXT_STYLE) } else { align_style };
+        push_typed_cell_xml(output, val, col_type, row_number - 1, col_index, style, date_time_format);
     }
     output.push_str("</row>");
 }
@@ -481,7 +482,7 @@ impl<W: Write + Seek> StreamingXlsxWriter<W> {
                 rows: &sheet.rows,
                 numeric_column_right_align: sheet.numeric_column_right_align,
             };
-            write_worksheet_xml(&mut self.zip, &segment, self.auto_filter, self.date_time_format.as_deref())?;
+            write_worksheet_xml(&mut self.zip, &segment, false, self.date_time_format.as_deref())?;
         }
 
         // 3. Write metadata files. These appear AFTER sheet data in the ZIP
@@ -578,16 +579,29 @@ fn value_text(value: Option<&Value>) -> String {
     }
 }
 
+fn needs_xml_space_preserve(value: &str) -> bool {
+    value.starts_with(' ')
+        || value.ends_with(' ')
+        || value.contains('\n')
+        || value.contains('\r')
+        || value.contains('\t')
+}
+
 fn estimate_column_widths(columns: &[String], column_comments: &[Option<String>], rows: &[Vec<Value>]) -> Vec<usize> {
     columns
         .iter()
         .enumerate()
         .map(|(col_index, col)| {
             let header_text = effective_header(col, column_comments.get(col_index).and_then(|c| c.as_deref()));
-            let max_len = std::iter::once(header_text.chars().count().min(60))
-                .chain(rows.iter().take(100).map(|row| value_text(row.get(col_index)).chars().count().min(60)))
+            let is_sql_col = col.eq_ignore_ascii_case("sql");
+            let max_clamp = if is_sql_col { 100 } else { 60 };
+            let max_len = std::iter::once(header_text.chars().count().min(max_clamp))
+                .chain(rows.iter().take(100).map(|row| {
+                    let text = value_text(row.get(col_index));
+                    text.lines().map(|line| line.chars().count()).max().unwrap_or(0).min(max_clamp)
+                }))
                 .fold(8usize, usize::max);
-            (max_len + 2).clamp(10, 60)
+            (max_len + 2).clamp(10, max_clamp)
         })
         .collect()
 }
@@ -612,7 +626,11 @@ fn cell_xml(value: Option<&Value>, row_index: usize, col_index: usize, style: Op
             }
         }
         Some(Value::String(s)) => {
-            format!("<c r=\"{reference}\" t=\"inlineStr\"{style_attr}><is><t>{}</t></is></c>", escape_xml(s))
+            let space_attr = if needs_xml_space_preserve(s) { " xml:space=\"preserve\"" } else { "" };
+            format!(
+                "<c r=\"{reference}\" t=\"inlineStr\"{style_attr}><is><t{space_attr}>{}</t></is></c>",
+                escape_xml(s)
+            )
         }
         Some(other) => format!(
             "<c r=\"{reference}\" t=\"inlineStr\"{style_attr}><is><t>{}</t></is></c>",
@@ -657,7 +675,11 @@ fn push_cell_xml(output: &mut String, value: Option<&Value>, row_index: usize, c
         Some(Value::String(value)) => {
             output.push_str(" t=\"inlineStr\"");
             push_cell_style(output, style);
-            output.push_str("><is><t>");
+            if needs_xml_space_preserve(value) {
+                output.push_str("><is><t xml:space=\"preserve\">");
+            } else {
+                output.push_str("><is><t>");
+            }
             push_xml_escaped(output, value);
             output.push_str("</t></is></c>");
         }
@@ -1056,7 +1078,7 @@ fn styles_xml(date_time_format: Option<&str>) -> String {
             "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills>",
             "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>",
             "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>",
-            "<cellXfs count=\"{}\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/><xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/><xf numFmtId=\"164\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"165\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment horizontal=\"right\"/></xf><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment horizontal=\"left\"/></xf>{}</cellXfs>",
+            "<cellXfs count=\"{}\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/><xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/><xf numFmtId=\"164\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"165\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment horizontal=\"right\"/></xf><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment horizontal=\"left\"/></xf>{}<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment wrapText=\"1\" vertical=\"top\"/></xf></cellXfs>",
             "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>",
             "</styleSheet>"
         ),
@@ -1064,7 +1086,7 @@ fn styles_xml(date_time_format: Option<&str>) -> String {
         escape_xml(&date_format),
         escape_xml(&datetime_format),
         scale_numfmts,
-        6 + MAX_NUMERIC_SCALE_FORMAT * 2,
+        7 + MAX_NUMERIC_SCALE_FORMAT * 2,
         scale_xfs
     )
 }
@@ -1378,7 +1400,8 @@ mod tests {
         let styles = read_zip_entry(&workbook, "xl/styles.xml");
         assert!(styles.contains("numFmtId=\"169\" formatCode=\"0.0000\""));
         assert!(styles.contains("numFmtId=\"172\" formatCode=\"0.0000000\""));
-        assert!(styles.contains("<cellXfs count=\"36\">"));
+        assert!(styles.contains("<cellXfs count=\"37\">"));
+        assert!(styles.contains("wrapText=\"1\" vertical=\"top\""));
 
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
         assert!(sheet.contains("<c r=\"A2\" s=\"12\"><v>5.0000</v></c>"));
@@ -1801,6 +1824,11 @@ mod tests {
             drop(writer.finish().expect("finish workbook"));
         }
 
+        let bytes = fs::read(&path).expect("read file bytes");
+        let sql_sheet_xml = read_zip_entry(&bytes, "xl/worksheets/sheet2.xml");
+        assert!(sql_sheet_xml.contains("s=\"36\""), "sql_sheet_xml={sql_sheet_xml}");
+        assert!(!sql_sheet_xml.contains("<autoFilter"), "trailing sql sheet should not have autoFilter");
+
         let mut workbook = open_workbook_auto(&path).expect("open workbook");
         assert_eq!(workbook.sheet_names(), &["Result".to_string(), "SQL".to_string()]);
         let result = workbook.worksheet_range("Result").expect("read result worksheet");
@@ -1808,6 +1836,37 @@ mod tests {
         assert_eq!(result.get_value((1, 0)), Some(&calamine::Data::Float(1.0)));
         assert_eq!(sql.get_value((1, 0)), Some(&calamine::Data::String("SELECT id, name FROM users".to_string())));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn sql_cells_preserve_whitespace_and_apply_wrap_text_style() {
+        let multiline_sql = "SELECT\n    id,\n    name\nFROM users";
+        let workbook = build_xlsx_workbook_multi(&[
+            XlsxWorksheetData {
+                sheet_name: Some("Data".to_string()),
+                columns: vec!["id".to_string()],
+                column_types: vec![],
+                column_comments: vec![],
+                rows: vec![vec![json!(1)]],
+                numeric_column_right_align: false,
+            },
+            XlsxWorksheetData {
+                sheet_name: Some("SQL".to_string()),
+                columns: vec!["SQL".to_string()],
+                column_types: vec![],
+                column_comments: vec![],
+                rows: vec![vec![json!(multiline_sql)]],
+                numeric_column_right_align: false,
+            },
+        ])
+        .expect("build workbook");
+
+        let sql_sheet_xml = read_zip_entry(&workbook, "xl/worksheets/sheet2.xml");
+        assert!(sql_sheet_xml.contains("s=\"36\""), "sql_sheet_xml={sql_sheet_xml}");
+        assert!(
+            sql_sheet_xml.contains("<t xml:space=\"preserve\">SELECT\n    id,\n    name\nFROM users</t>"),
+            "sql_sheet_xml={sql_sheet_xml}"
+        );
     }
 
     #[test]

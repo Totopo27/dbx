@@ -86,7 +86,7 @@ test("ignores fractional trailing zeros when checking Excel numeric precision", 
 });
 
 test("builds a result workbook with a separate SQL worksheet", () => {
-  const sqlWorksheet = buildXlsxSqlWorksheet([{ sql: "SELECT id, name FROM users WHERE active = true" }]);
+  const sqlWorksheet = buildXlsxSqlWorksheet([{ sql: "SELECT\n  id,\n  name\nFROM users\nWHERE active = true" }]);
   assert.ok(sqlWorksheet);
   const workbook = buildXlsxWorkbookMulti([{ sheetName: "Result", columns: ["id", "name"], rows: [[1, "Ada"]] }, sqlWorksheet]);
   const text = new TextDecoder().decode(workbook);
@@ -94,7 +94,8 @@ test("builds a result workbook with a separate SQL worksheet", () => {
   assert.match(text, /name="Result"/);
   assert.match(text, /name="SQL"/);
   assert.match(text, /xl\/worksheets\/sheet2\.xml/);
-  assert.match(text, /SELECT id, name FROM users WHERE active = true/);
+  assert.match(text, /wrapText="1" vertical="top"/);
+  assert.match(text, /<c r="A2" t="inlineStr" s="4"><is><t xml:space="preserve">SELECT\n  id,\n  name\nFROM users\nWHERE active = true<\/t><\/is><\/c>/);
 });
 
 test("web in-memory XLSX export splits oversized worksheets", () => {

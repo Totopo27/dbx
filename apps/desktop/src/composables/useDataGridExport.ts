@@ -543,7 +543,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           numericColumnRightAlign: rightAlign,
           autoFilter,
         },
-        { ...sqlWorksheet, autoFilter },
+        { ...sqlWorksheet, autoFilter: false },
       ],
       autoFilter,
       dateTimeFormat,
@@ -1291,7 +1291,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           autoFilter: exportOptions.autoFilter,
         }));
         const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet(sheets.map((sheet) => ({ resultName: sheet.sheetName, sql: sheet.sql || sheet.result.sourceStatement || "" }))) : undefined;
-        await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [...worksheets, { ...sqlWorksheet, autoFilter: exportOptions.autoFilter }] : worksheets, exportOptions.autoFilter, exportPattern || undefined);
+        await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [...worksheets, { ...sqlWorksheet, autoFilter: false }] : worksheets, exportOptions.autoFilter, exportPattern || undefined);
         toast(t("grid.exported"));
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
