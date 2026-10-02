@@ -360,10 +360,13 @@ impl PluginSidecarSession {
         self.prompts.close();
         let mut child = self.child.lock().await;
         let kill_result = child.kill().await;
-        // On Windows and Unix, reaping the child via wait() ensures the OS releases all process
-        // handles, loaded executable binaries, and file locks before callers attempt to rename
-        // or delete the plugin's container directory (fixes os error 5 / access denied on uninstall).
-        let _ = child.wait().await;
+        // tokio's kill() is start_kill() + wait(), so a successful kill has
+        // already reaped the child; this bounded wait only covers the rare
+        // kill-failure path where the process is still alive. The OS releases
+        // the executable image lock when the session (holding kill_on_drop
+        // Child) drops, which uninstall performs before renaming the plugin
+        // directory (fixes os error 5 / access denied on uninstall).
+        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
         let message = kill_result.err().map(|error| error.to_string());
         fail_pending(&self.pending, "Plugin session stopped").await;
         self.status.send_replace(PluginSessionStatus::new(PluginSessionState::Stopped, message));
