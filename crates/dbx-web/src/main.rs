@@ -1442,13 +1442,14 @@ async fn serve() {
     tokio::spawn(async move {
         #[cfg(unix)]
         {
-            let mut terminate = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!("Failed to install SIGTERM handler: {e}");
-                    return;
-                }
-            };
+            let mut terminate: Option<tokio::signal::unix::Signal> =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        tracing::error!("Failed to install SIGTERM handler: {e}; continuing with Ctrl+C only");
+                        None
+                    }
+                };
             tokio::select! {
                 res = tokio::signal::ctrl_c() => {
                     if let Err(e) = res {
@@ -1457,7 +1458,14 @@ async fn serve() {
                         tracing::info!("Shutdown signal received (Ctrl+C)");
                     }
                 }
-                _ = terminate.recv() => {
+                _ = async {
+                    match terminate.as_mut() {
+                        Some(signal) => {
+                            signal.recv().await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
                     tracing::info!("Shutdown signal received (SIGTERM)");
                 }
             }
@@ -1480,10 +1488,14 @@ async fn serve() {
     });
 
     // If graceful shutdown of HTTP connections takes longer than 5 seconds, abort to ensure prompt termination on Ctrl+C.
+    // Non-zero exit codes keep systemd's Restart=on-failure meaningful: a serve error or an
+    // undrained backup worker must not look like a clean stop.
+    let mut exit_code = 0i32;
     tokio::select! {
         res = serve_future => {
             if let Err(e) = res {
                 tracing::error!("Server error: {e}");
+                exit_code = 1;
             }
         }
         _ = async {
@@ -1493,9 +1505,12 @@ async fn serve() {
             tracing::warn!("Graceful HTTP shutdown timed out after 5s; proceeding with teardown");
         }
     }
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), backup_worker).await;
+    if tokio::time::timeout(std::time::Duration::from_secs(5), backup_worker).await.is_err() {
+        tracing::warn!("Scheduled backup worker did not drain within 5s; exiting with failure status");
+        exit_code = 1;
+    }
     shutdown_state.shutdown(std::time::Duration::from_secs(3)).await;
-    std::process::exit(0);
+    std::process::exit(exit_code);
 }
 
 #[cfg(test)]
