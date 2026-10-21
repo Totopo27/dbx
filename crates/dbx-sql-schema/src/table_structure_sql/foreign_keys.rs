@@ -100,7 +100,7 @@ fn has_foreign_key_change(foreign_key: &EditableStructureForeignKey, original: &
 fn drop_foreign_key_sql(dialect: StructureDialect, table: &str, name: &str) -> String {
     match dialect {
         StructureDialect::Mysql => format!("ALTER TABLE {table} DROP FOREIGN KEY {};", quote_ident(dialect, name)),
-        StructureDialect::Postgres | StructureDialect::Oracle => {
+        StructureDialect::Postgres | StructureDialect::Oracle | StructureDialect::SqlServer => {
             format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, name))
         }
         _ => unreachable!("foreign key SQL requested for unsupported dialect"),
