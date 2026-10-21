@@ -171,6 +171,9 @@ fn action_clause(dialect: StructureDialect, prefix: &str, value: &str, warnings:
     if action.is_empty() {
         return None;
     }
+    if dialect == StructureDialect::SqlServer && action == "RESTRICT" {
+        return Some(format!("{prefix} NO ACTION"));
+    }
     if dialect == StructureDialect::Oracle {
         if prefix == "ON UPDATE" {
             if action != "NO ACTION" {
