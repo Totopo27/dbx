@@ -594,7 +594,12 @@ fn parse_csv_record(record: &str) -> Vec<String> {
 #[test]
 fn csv_formula_protection_covers_fullwidth_prefixes_but_not_typed_negative_numbers() {
     let mut request = request(DataGridExtractorId::Csv);
-    request.columns = vec![column("amount", 0), column("formula", 1), column("untyped_negative", 2), column("numeric_string_negative", 3)];
+    request.columns = vec![
+        column("amount", 0),
+        column("formula", 1),
+        column("untyped_negative", 2),
+        column("numeric_string_negative", 3),
+    ];
     request.columns[0].data_type = Some("DECIMAL".into());
     request.columns[1].data_type = Some("TEXT".into());
     request.columns[2].data_type = None;
